@@ -1,0 +1,126 @@
+\section{Introducción}
+
+Para la implementación del diseño de la nueva versión del servidor utilizando el esquema de threads \textit{master-slave}, se tomó como base la implementación de \texttt{servidor\_mono.c} y se creó un nuevo archivo llamado \texttt{servidor\_multi.c}. Se ha modificado la estructura \texttt{t\_aula} y también ligeramente las rutinas originales de \texttt{servidor\_mono.c} para agregar principalmente el código de creación de threads en \texttt{main} y la protección de las variables compartidas en el acceso concurrente en algunas rutinas.
+
+\section{Implementación}
+
+Al llegar un pedido de conexión de un cliente, se crea un nuevo thread que será el encargado de llevar la conversación con dicho cliente. Este thread recibirá como parámetro el file descriptor de la conexión y un puntero al aula a través de la estructura auxiliar \texttt{thread\_args}, cuyo declaración se muestra a continuación:
+
+\begin{lstlisting}[frame=leftline]
+  typedef struct {
+    int socket_fd;
+    t_aula *el_aula;
+  } thread_args;
+\end{lstlisting}
+
+Por consiguiente, una vez recibida una conexión, la creación de los \textit{worker} threads se realiza de la siguiente manera:
+
+\begin{lstlisting}[frame=leftline]
+  thread_args* args = (thread_args*) malloc(1 * sizeof(thread_args));
+  args->socket_fd = socketfd_cliente;
+  args->el_aula = &el_aula;
+
+  pthread_t thread;
+  pthread_create(&thread, NULL, atendedor_de_alumno, (void*) args)
+\end{lstlisting}
+
+Como puede verse, luego de reservar memoria para la estructura auxiliar e inicializarla con el file descriptor de la conexión y el puntero al aula, utilizamos la rutina \texttt{pthread\_create} para crear el worker thread, donde \texttt{thread} recibe el id del thread, la rutina \texttt{atendedor\_de\_alumno} es el código que comenzará a ejecutar este nuevo thread y \texttt{args} es la dirección de la estructura \texttt{thread\_args} que recibirá como argumento dicha rutina, ya que su signature ha cambiado a:
+
+\begin{lstlisting}[frame=leftline]
+  void *atendedor_de_alumno(void* args)
+\end{lstlisting}
+
+Más allá del cambio en el signature, la única modificación a la rutina \texttt{atendedor\_de\_alumno} consiste en que también se llama a la rutina \texttt{terminar\_thread} cuando se corta la conexión o se produce un error, con el objetivo de liberar la memoria de la estructura auxiliar utilizada por el thread y terminar al thread mediante un llamado a \texttt{pthread\_exit}:
+
+\begin{lstlisting}[frame=leftline]
+  void terminar_thread(void* args)
+  {
+    free(args);
+    pthread_exit(NULL);
+  }
+\end{lstlisting}
+
+\newpage
+
+Está claro que al usar un diseño con múltiples threads se deben proteger los datos compartidos de los accesos concurrentes. Para ello utilizamos varios mutexes \texttt{pthread\_mutex\_t} junto con sus rutinas asociadas \texttt{pthread\_mutex\_lock} y \texttt{pthread\_mutex\_unlock}. Los datos compartidos entre todos los threads son únicamente los datos del aula, cuyo puntero es pasado a cada uno de los threads como parte de la estructura auxiliar \texttt{thread\_args}.
+\\\\
+La estructura \texttt{t\_aula} se modifica incorporando los siguientes campos:
+
+\begin{lstlisting}[frame=leftline]
+  pthread_mutex_t posiciones_mx;
+  pthread_mutex_t cantidad_de_personas_mx;
+  pthread_mutex_t rescatistas_disponibles_mx;
+  pthread_cond_t  rescatistas_disponibles_cv;
+\end{lstlisting}
+
+El mutex \texttt{posiciones\_mx} se utiliza para controlar las modificaciones concurrentes al array \texttt{posiciones} de \texttt{t\_aula}. Asimismo, \texttt{cantidad\_de\_personas\_mx} se utiliza para controlar el acceso al campo \texttt{cantidad\_de\_personas} de \texttt{t\_aula}. Por otro lado, \texttt{rescatistas\_disponibles\_mx} se utiliza junto con la \textit{variable de condición} \texttt{rescatistas\_disponibles\_cv} para manejar la lógica de los rescatistas.
+\\\\
+Estas variables son debidamente inicializadas en la función \texttt{t\_aula\_iniciar\_vacia}:
+
+\begin{lstlisting}[frame=leftline]
+  pthread_mutex_init(&(el_aula->posiciones_mx), NULL);
+  pthread_mutex_init(&(el_aula->cantidad_de_personas_mx), NULL);
+  pthread_mutex_init(&(el_aula->rescatistas_disponibles_mx), NULL);
+  pthread_cond_init(&(el_aula->rescatistas_disponibles_cv), NULL);
+\end{lstlisting}
+  
+Estas nuevas variables pueden ser accedidas por cualquiera de los worker threads ya que se encuentran en la estructura \texttt{t\_aula}, y por consiguiente cualquier acceso a las variables funcionales de \texttt{t\_aula} se protegen con los mutexes correspondientes. Por ejemplo, en \texttt{t\_aula\_ingresar}:
+
+\begin{lstlisting}[frame=leftline]
+  void t_aula_ingresar(t_aula *el_aula, t_persona *alumno)
+  {
+    pthread_mutex_lock(&(el_aula->cantidad_de_personas_mx));
+    el_aula->cantidad_de_personas++;
+    pthread_mutex_unlock(&(el_aula->cantidad_de_personas_mx));
+
+    pthread_mutex_lock(&(el_aula->posiciones_mx));
+    el_aula->posiciones[alumno->posicion_fila][alumno->posicion_columna]++;
+    pthread_mutex_unlock(&(el_aula->posiciones_mx));
+  }
+\end{lstlisting}
+
+Obsérvese cómo utilizamos el mutex \texttt{cantidad\_de\_personas\_mx} para proteger el acceso a la variable \texttt{cantidad\_de\_personas}. Lo mismo con el mutex \texttt{posiciones\_mx} y la variable \texttt{posiciones}. Nótese que utilizamos el mismo mutex \texttt{posiciones\_mx} para proteger el acceso a cualquier posición (fila, columna) del array \texttt{posiciones}.
+\\\\  
+Un caso aparte es el de la función \texttt{colocar\_mascara}:
+
+\begin{lstlisting}[frame=leftline]
+  void colocar_mascara(t_aula *el_aula, t_persona *alumno)
+  {
+    printf("Esperando rescatista. Ya casi %s!\n", alumno->nombre);
+
+    pthread_mutex_lock(&(el_aula->rescatistas_disponibles_mx));
+    while(el_aula->rescatistas_disponibles == 0)
+      pthread_cond_wait(&(el_aula->rescatistas_disponibles_cv), 
+        &(el_aula->rescatistas_disponibles_mx));
+    el_aula->rescatistas_disponibles--;
+    pthread_mutex_unlock(&(el_aula->rescatistas_disponibles_mx));
+    
+    alumno->tiene_mascara = true;
+
+    pthread_mutex_lock(&(el_aula->rescatistas_disponibles_mx));
+    el_aula->rescatistas_disponibles++;
+    pthread_cond_signal(&(el_aula->rescatistas_disponibles_cv));
+    pthread_mutex_unlock(&(el_aula->rescatistas_disponibles_mx));
+  }
+\end{lstlisting}
+
+En este caso tenemos que chequear que haya un rescatista disponible previamente. Si lo hay, restamos uno a la cantidad de rescatistas disponibles, ponemos la máscara al alumno y luego volvemos a incrementar esta cantidad. Todo esto se realiza dentro de la región crítica enmarcada por \texttt{rescatistas\_disponibles\_mx}. Si no hay rescatistas disponibles, entonces esperamos en la \textit{variable de condición} \texttt{rescatistas\_disponibles\_cv} (obsérvese que primero se hizo un lock en \texttt{rescatistas\_disponibles\_mx}). Como sabemos que esta función puede tener \textit{wakeups espúreos}, realizamos el chequeo de la condición y la espera en la variable de condición en un \texttt{while}. Por otro lado, luego de poner la máscara al alumno y dentro de la región crítica enmarcada por \texttt{rescatistas\_disponibles\_mx}, hacemos un signal sobre \texttt{rescatistas\_disponibles\_cv} para que proceda con otro alumno en caso de que haya otros threads clientes dormidos en esa variable de condición.
+
+\section{Escalamiento}
+
+Si bien el enunciado pregunta si el software es capaz de escalar a 100.000 clientes o más, no hace referencia a un número concreto de clientes \textit{concurrentes}, sino que menciona el proponer modificaciones para atender a \textit{muchos clientes} concurrentemente.
+
+Por consiguiente, surgen en forma natural algunas modificaciones que pueden aumentar la concurrencia del servidor implementado. Estas son:
+
+\begin{itemize}
+  \item Modificar la granularidad del locking en el array \texttt{posiciones}\\\\
+  Anteriormente mencionábamos que utilizamos el mismo mutex \texttt{posiciones\_mx} para proteger el acceso a cualquier posición (fila, columna) del array \texttt{posiciones}. Cuando existen muchos clientes concurrentes modificando dicho array, esto produce un cuadro de contención innecesario. Podemos entonces modificar este esquema para en vez de contar con un único mutex para todo el array, utilizar un mutex diferente por cada elemento del mismo. Es decir, en este caso tendríamos ANCHO\_AULA x ALTO\_AULA mutexes, declarando simplemente un array de mutexes. Cuando queremos modificar o acceder a determinada posición del array \texttt{posiciones} en (fila, columna), hacemos locking en el mutex identificado por (fila, columna) en forma correspondiente. De esta manera, sólo existirá contención entre aquellos clientes (threads) que estén queriendo acceder a la misma posición en el array.\\
+  \item Utilizar un \textit{thread pool}\\\\
+  Sabemos que el número de threads en un sistema tiene un límite específico que depende del sistema operativo, pero que en líneas generales no es muy grande y se ve limitado por los recursos de hardware que dispone el sistema.\\\\
+Asimismo, si bien la creación de un thread es memos costosa en cuanto a recursos del sistema que crear un nuevo proceso, crear un thread cada vez que recibimos una conexión y luego destruirlo cuando la conversación con el cliente se ha terminado genera un stress innecesario en el sistema, y tiene un impacto negativo consistente en la demora en la creación del thread. \\\\
+Otro problema que puede presentarse es que si no ponemos un límite al número concurrente de threads activos, esto puede llegar al agotamiento de los recursos del sistema, como ser memoria o cpu, lo que hará que se degrade la performance considerablemente.\\ 
+Podemos combatir estos problemas empleando un \textit{thread pool}.\\\\
+Un \textit{thread pool} consiste en un módulo que realice una pre-creación de worker threads hasta un tamaño indicado, o realice la creación de los mismos bajo demanda, pero siempre hasta un máximo. Una vez que estos worker threads se han creado, nunca los destruimos, sino que los vamos reutilizando de cliente en cliente a medida que las conversaciones con los mismos van terminando y los threads quedan nuevamente disponibles en el pool para ser reutilizados con otro cliente. Cuando las conexiones recibidas excede la cantidad de threads disponibles, éstas quedan encoladas en una cola asociada al pool, para ser atendidas ni bien se libere algún worker thread.
+\end{itemize}
+
+

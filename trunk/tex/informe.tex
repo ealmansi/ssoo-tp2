@@ -1,0 +1,31 @@
+\documentclass[a4paper,11pt]{article}
+\usepackage[utf8x]{inputenc}
+\usepackage{a4wide}
+\usepackage[spanish,activeacute]{babel}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{listings}
+\usepackage{placeins}
+\usepackage[colorlinks,citecolor=black,filecolor=black,linkcolor=black,    urlcolor=black]{hyperref}
+\floatstyle{boxed}
+\newfloat{tarea}{thpH}{lop}
+\floatname{tarea}{Lote}
+
+\begin{document}
+\lstset{language=C}
+\lstset{ %
+  basicstyle=\small
+}
+
+\markboth{left head}{Sistemas Operativos 2014 -- TP N\textordmasculine 2}
+\pagestyle{myheadings}
+
+\input{frontpage}
+
+\clearpage
+\tableofcontents
+
+\clearpage
+\input{ejercicio}
+
+\end{document}
